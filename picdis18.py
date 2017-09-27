@@ -26,7 +26,10 @@ although the processor type should be changed (default 18F252)
 #Use this code at your own risk.
 
 import getopt, os, sys, string
+import os
 from tokens import *
+
+arch_dir, _ = os.path.split(__file__)
 
 debug = 0
 tabsize = 4
@@ -109,7 +112,7 @@ def read_object_code (objectfile):
 
 def read_registry_names():
 	# Provide symbolic names for all special file registers
-	f = open ('regnames18.txt', "r");
+	f = open (os.path.join(arch_dir, 'regnames18.txt'), "r");
 	regn = {}
 	rn = f.readlines()
 	for x in rn:
@@ -137,7 +140,7 @@ def read_registry_names():
 # examples of the use of this table
 #
 def make_operand_table ():
-	f = open ('opcodes18.txt', "r");
+	f = open (os.path.join(arch_dir,'opcodes18.txt'), "r");
 	oplist = []
 	opcode_templates = f.readlines()
 	for x in opcode_templates:#.split ('\n'):
@@ -149,8 +152,8 @@ def make_operand_table ():
 		opcode = opcode_tokens[0]
 		operands = []
 		if len(opcode_tokens) > 1:
-    		for operand in opcode_tokens.split(','):
-    			operands.append(operand)
+			for operand in opcode_tokens[1].split(','):
+				operands.append(operand)
 		cv = cm = 0					# init code_value, code_mask
 		for ch in c:				# for each character in the bit template
 			if ch == '0':
@@ -165,7 +168,7 @@ def make_operand_table ():
 				cv = 0 | (cv << 1)	# value 0 to ignore this bit position
 				cm = 0 | (cm << 1)	# mask  0 to ignore this bit position
 		a = a.replace (' ', '\t')	# make the opcode/operands separator a tab
-		oplist.append (((opcode, operands), cv, cm))	# append a (asm_template, value, mask) tuple
+		oplist.append ((opcode, operands, cv, cm))	# append a (asm_template, value, mask) tuple
 	f.close()
 	return tuple (oplist)			# Eg: ('addwf	F, D, A', 0x4800, 0xfc00)
 
@@ -176,22 +179,10 @@ def make_operand_table ():
 #
 def matching_opcode (w):
 	global operand_table
-	for x in operand_table:
-		if (w & x[2]) == x[1]:		# code[].bin & code_mask == code_value
-			return x[0]
-	return "X"						# unidentifiable binary -- punt
-
-def lookup_adr(addr):
-	global code
-	if code.has_key(addr):
-		return code[addr] 
-	else:							# exceptional case: a jump to a location not defined in hexfile 
-		x = Instruction()			#					or a missing second word in a dword instr
-		x.dummy = 1
-		x.bin = 0xffff
-		code[addr] = x
-		return x
-	
+	for opcode, operands, code_value, code_mask in operand_table:
+		if (w & code_mask) == code_value:		# code[].bin & code_mask == code_value
+			return opcode, operands
+	return ("UNK", ())						# unidentifiable binary -- punt
 
 ###################################################################
 # F		.... .... ffff ffff
@@ -206,9 +197,11 @@ def lookup_adr(addr):
 # W		double  -call,goto
 # Y		double  -movff
 # Z		double  -lfsr
-def assembly_line (w,w2):
+def assembly_line (addr, w,w2):
 
 	opcode_name, operands = matching_opcode (w)		# get the right assembly template
+	size = 2
+	dest = 0
 	af = w & 0x100				# `guess` `A` flag
 	if debug: print hexc(w), t
 	s = []						# init the return value
@@ -219,19 +212,19 @@ def assembly_line (w,w2):
 			if af==0 and q>=0x80:
 				s.append (RegisterToken(reg_names.get (q | 0xF00, hexc(q))))
 			else:
-				s.append (RegisterToken(hexc(q)))
-		elif c == 'D':			# insert a ",w" modifier=0, if appropriate
+				s.append (RegisterToken(q))
+		elif operand == 'D':			# insert a ",w" modifier=0, if appropriate
 			if (w & 0x200) == 0:
-				s.append (TextToken('W')
+				s.append (TextToken('W'))
 			else:
-			    s.append (TextToken('f')
-		elif c == 'B':			# insert a bit-number
-			s.append (IntegerToken( '%d' % (((w >> 9) & 0x7),) ))
-		elif c == 'K':			# insert an 8-bit constant
-			s.append (IntegerToken((hexc(w & 0xFF))))
-		elif c == 'C':			# movlb
-			s.append (IntegerToken((hexc(w & 0xF))))
-		elif c == 'N':			# branch relative +- 127
+			    s.append (TextToken('f'))
+		elif operand == 'B':			# insert a bit-number
+			s.append (IntegerToken(((w >> 9) & 0x7) ))
+		elif operand == 'K':			# insert an 8-bit constant
+			s.append (IntegerToken((w & 0xFF)))
+		elif operand == 'C':			# movlb
+			s.append (IntegerToken(w & 0xF))
+		elif operand == 'N':			# branch relative +- 127
 			q = w & 0xFF
 			if q < 0x80:
 				dest = addr + 2 + q*2
@@ -241,39 +234,42 @@ def assembly_line (w,w2):
 
 			#s.append (makelabel(dest))
 			#lookup_adr(dest).calls.append(addr)
-		elif c == 'M':			# insert a rcall/bra relative +- 1023 
+		elif operand == 'M':			# insert a rcall/bra relative +- 1023 
 			q = w & 0x7FF
 			if q < 0x400:
 				dest = addr + 2 + q*2
 			else:
 				dest = addr + 2 - (0x800 - q)*2
 			s.append(AddressToken(dest))
-		elif c == 'A':			# access bank = 0 implicit
+		elif operand == 'A':			# access bank = 0 implicit
 			if (w & 0x100) != 0:
 				s.append(TextToken('BANKED'))
 			#elif s[-3:] == [',','f',',']:# do not show:	,f,0
 			#	s = s[:-3]
 			#elif s[-1] == ',':	# do not show:	,0
 			#	del s[-1]
-		elif c == 'S':			# =1 restore reg. on ret: retfie/return (implicit 0)
+		elif operand == 'S':			# =1 restore reg. on ret: retfie/return (implicit 0)
 			if (w & 0x1) == 1:
-				s.append (TextToken('FAST')
+				s.append (TextToken('FAST'))
 			#elif s[-1] == ',':
 			#	del s[-1]
-		elif c == 'Y':			# dword	movff
+		elif operand == 'Y':			# dword	movff
+			size = 4
 			s.append (RegisterToken(reg_names.get (w  & 0xFFF, hexc(w  & 0xFFF)))) 
 			s.append (RegisterToken(reg_names.get (w2 & 0xFFF, hexc(w2 & 0xFFF))))
-		elif c == 'W':			# dword	call/goto
+		elif operand == 'W':			# dword	call/goto
+			size = 4
 			dest = ((w & 0xFF) | ((w2 & 0xFFF) << 8))*2
 			s.append(AddressToken(dest))
 			if ((w & 0x300) ^ 0x100) == 0:	# only if its a 'call' and 's' is set
-				s.append (TextToken('FAST')
-		elif c == 'Z':			# dword	lfsr
+				s.append (TextToken('FAST'))
+		elif operand == 'Z':			# dword	lfsr
+			size = 4
 			s.append (str((w & 0x30) >> 4) +','+ hexc(((w & 0xF) << 8) | (w2 & 0xFF)) )
 		#elif c == 'X':			# insert the hex version of the whole word
 		#	s.append ('DE ' + hexc(w) + '\t\t;WARNING: unknown instruction!')
 
-	return s
+	return opcode_name, size, dest, s
 # end assembly_string
 
 def eep_cfg_txt():					# generate text for the eeprom and configuration words

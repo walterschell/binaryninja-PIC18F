@@ -1,4 +1,6 @@
 from binaryninja.enums import *
+from binaryninja import *
+
 # These functions are wrappers for generating tokens for dissassembly
 def TextToken(txt):
     return InstructionTextToken(InstructionTextTokenType.TextToken, txt)
